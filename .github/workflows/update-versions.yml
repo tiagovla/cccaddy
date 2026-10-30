@@ -1,0 +1,86 @@
+name: Update Caddy and plugin versions
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cccaddy-version-update-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  update:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Get latest stable versions
+        id: versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release_tag="$(gh api repos/caddyserver/caddy/releases/latest --jq .tag_name)"
+          caddy_version="${release_tag#v}"
+          cloudflare_version="$(curl -fsSL https://proxy.golang.org/github.com/caddy-dns/cloudflare/@latest | jq -r .Version)"
+          crowdsec_version="$(curl -fsSL https://proxy.golang.org/github.com/hslatman/caddy-crowdsec-bouncer/@latest | jq -r .Version)"
+
+          if [[ ! "$caddy_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Unexpected Caddy release tag: $release_tag" >&2
+            exit 1
+          fi
+          if [[ ! "$cloudflare_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Unexpected Cloudflare module version: $cloudflare_version" >&2
+            exit 1
+          fi
+          if [[ ! "$crowdsec_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Unexpected CrowdSec module version: $crowdsec_version" >&2
+            exit 1
+          fi
+
+          sed -i \
+            -e "s/^ARG CADDY_VERSION=.*/ARG CADDY_VERSION=$caddy_version/" \
+            -e "s/^ARG CLOUDFLARE_VERSION=.*/ARG CLOUDFLARE_VERSION=$cloudflare_version/" \
+            -e "s/^ARG CROWDSEC_VERSION=.*/ARG CROWDSEC_VERSION=$crowdsec_version/" \
+            Dockerfile
+          grep -qx "ARG CADDY_VERSION=$caddy_version" Dockerfile
+          grep -qx "ARG CLOUDFLARE_VERSION=$cloudflare_version" Dockerfile
+          grep -qx "ARG CROWDSEC_VERSION=$crowdsec_version" Dockerfile
+
+          changed=false
+          if ! git diff --quiet -- Dockerfile; then
+            changed=true
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        if: steps.versions.outputs.changed == 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Validate updated Dockerfile
+        if: steps.versions.outputs.changed == 'true'
+        run: docker buildx build --platform linux/amd64 --load --tag cccaddy:validation .
+
+      - name: Commit updated versions
+        if: steps.versions.outputs.changed == 'true'
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add Dockerfile
+          git commit -m "chore: update Caddy and module versions"
+          git push origin "HEAD:$BRANCH"
+
+      - name: Trigger image publish
+        if: steps.versions.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/dispatches" -f event_type=cccaddy-versions-updated
