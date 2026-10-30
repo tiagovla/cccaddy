@@ -2,7 +2,7 @@ name: Update Caddy and plugin versions
 
 on:
   schedule:
-    - cron: "17 * * * *"
+    - cron: "30 0 * * *"
   workflow_dispatch:
 
 permissions:
